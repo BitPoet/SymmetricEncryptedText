@@ -1,0 +1,307 @@
+<?php namespace ProcessWire;
+
+class SymmetricEncryptedText extends WireData implements Module, ConfigurableModule {
+	
+	public static function getModuleInfo() {
+		return [
+			"title"			=>	"Symmetric Encryption for Text Fields",
+			"summary"		=>	"Store values of text fields in the database encrypted",
+			"version"		=>	"0.1.0",
+			"autoload"		=>	true,
+			"singular"		=>	true,
+		];
+	}
+	
+	protected $useEncryption = false;
+	protected $useLibsodium = false;
+	protected $myKey = "";
+	
+	public function __construct() {
+		$this->addHookAfter("FieldtypeText::sleepValue", $this, "sleepValue");
+		$this->addHookAfter("FieldtypeText::wakeupValue", $this, "wakeupValue");
+		$this->addHookAfter("FieldtypeText::getConfigAllowContext", $this, "getConfigAllowContext");
+		$this->addHookAfter("FieldtypeText::getConfigInputfields", $this, "getConfigInputfields");
+	}
+	
+	public function init() {
+
+		if(version_compare(phpversion(), "7.2", ">=") && extension_loaded('sodium') && ! $this->forceCompatEncryption) {
+			$this->useLibsodium = true;
+		} else {
+			require($this->config->paths->{$this->className} . "vendor/autoload.php");
+			
+			$this->aes = new \phpseclib\Crypt\AES();
+		}
+
+		$this->myKey = $this->loadKey();
+		
+		if(! $this->myKey) {
+			$this->warning($this->_("No encryption key found, not using encryption!"));
+			return;
+		}
+
+		$this->useEncryption = true;
+	}
+	
+	/**
+	 * Hooks after FieldtypeText::sleepValue and encrypts the value
+	 * if encryption is active.
+	 *
+	 * @returns String|array $encrypted The base64 encoded encrypted value
+	 */
+	public function sleepValue(HookEvent $event) {
+		$page = $event->arguments(0);
+		
+		$field = $page->template->fieldgroup->getFieldContext($event->arguments(1));
+		
+		// Do not encrypt empty values
+		if(! $event->return) return;
+		
+		if($this->useEncryption && $field->useSymmetricEncryptedValues)
+		{
+			if(is_string($event->return)) {
+				$event->return = $this->encrypt($event->return);
+			} else if(is_array($event->return)) {
+				$out = [];
+				foreach($event->return as $k => $item) {
+					$out[$k] = $item ? $this->encrypt($item) : '';
+				}
+				$event->return = $out;
+			}
+		}
+	}
+	
+	/**
+	 * Check if field can be encrypted. Native fields can not.
+	 *
+	 * @returns bool $canEncrypt
+	 */
+	private function canEncrypt($fieldname) {
+		return ! $this->fields->isNative($fieldname);
+	}
+	
+	/**
+	 * Hooks after FieldtypeText::wakeupValue and decrypts the value if
+	 * encryption is active
+	 *
+	 * Note: the database value is base64 decoded before decryption
+	 *
+	 * @returns String|array $decrypted the decoded value
+	 */
+	public function wakeupValue(HookEvent $event) {
+		$page = $event->arguments(0);
+		
+		$field = $page->template->fieldgroup->getFieldContext($event->arguments(1));
+		
+		// Do not try to decrypt empty values
+		if(! $event->return) return;
+		
+		if($this->useEncryption && $field->useSymmetricEncryptedValues)
+		{
+			if(is_string($event->return))
+				$event->return = $this->decrypt($event->return);	
+			else if(is_array($event->return)) {
+				$out = [];
+				foreach($event->return as $item) {
+					$out[] = $item ? $this->decrypt($item) : '';
+				}
+			} else if($event->return instanceOf LanguagesPageFieldValue) {
+				foreach($this->languages as $lang) {
+					$event->return->setLanguageValue($lang, $event->return->getLanguageValue($lang) ? $this->decrypt($event->return->getLanguageValue($lang)) : '');
+				}
+			}
+		}
+	}
+	
+	/**
+	 * Allow configuring symmetric encryption also in template context for fields
+	 */
+	public function getConfigAllowContext(HookEvent $event) {
+		$event->return = array_merge($event->return, ["useSymmetricEncryptedValues"]);
+	}
+	
+	/**
+	 * Add encryption option to all fields inheriting from FieldtypeText
+	 *
+	 */
+	public function getConfigInputfields(HookEvent $event) {
+
+		$inputfields = $event->return;
+		$field = $event->arguments(0);
+		
+		// Do not encrypt build-in fields
+		if(! $this->canEncrypt($field->name)) return;
+		
+		$f = $this->modules->get("InputfieldCheckbox");
+		$f->label = $this->_("Encrypt Values Symmetrically");
+		$f->attr('name', 'useSymmetricEncryptedValues');
+		if($field->useSymmetricEncryptedValues) $f->attr('checked', 'checked');
+		$f->description = $this->_("If checked, values are stored in the database with symmetric encryption and cannot be searched with selectors!");
+		if(! $this->myKey) {
+			$f->attr('disabled', 'disabled');
+			$f->notice = $this->_("You need to configure your encryption key first! Go to the settings of module SymmetricEncryptedText.");
+		}
+		
+		$inputfields->append($f);
+		
+		$event->return = $inputfields;
+	}
+	
+	/**
+	 * Load the encryption/decryption key.
+	 *
+	 * This just returns the key in $config->symmetricKey stored in site/config.php,
+	 * but you can hook into that method and use more elaborate means (like fetching
+	 * it from a remote server using a time-dependent password) to make things more
+	 * secure.
+	 *
+	 * @returns String $key
+	 */
+	public function ___loadKey() {
+		return $this->config->symmetricKey;
+	}
+	
+	/**
+	 * Decrypt the passed string using the loaded key
+	 *
+	 * @returns String $decrypted
+	 */
+	public function decrypt($rawinput) {
+		$decrypted = "";
+		
+		list($iv, $input) = explode('|', $rawinput);
+		
+		// If we find no pipe delimiter, we still have an unencrypted field here
+		if(! $input) return $rawinput;
+		
+		$iv = base64_decode($iv);
+		$input = base64_decode($input);
+		
+		// If $input is empty, we too have an unencrypted field here
+		if(! $input) return $rawinput;
+		
+		$key = base64_decode($this->myKey);
+		
+		if($this->useLibsodium) {
+			// Check that key length matches SODIUM_CRYPTO_SECRETBOX_KEYBYTES, if not leave untouched
+			if(strlen($key) != \SODIUM_CRYPTO_SECRETBOX_KEYBYTES) return $rawinput;
+			$decrypted = \sodium_crypto_secretbox_open($input, $iv, $key);
+		} else {
+			$this->aes->setKey($key);
+			$this->aes->setIV($iv);
+			
+			$decrypted = $this->aes->decrypt($input);
+		}
+		
+		return $decrypted;
+	}
+	
+	/**
+	 * Encrypt the passed string using the loaded key and a random IV
+	 */
+	public function encrypt($input) {
+		$crypted = "";
+		$iv = $this->generateIV();
+
+		$key = base64_decode($this->myKey);
+		
+		if($this->useLibsodium) {
+			// Check that key length matches SODIUM_CRYPTO_SECRETBOX_KEYBYTES, if not leave untouched
+			if(strlen($key) != \SODIUM_CRYPTO_SECRETBOX_KEYBYTES) return $input;
+			$crypted = \sodium_crypto_secretbox($input, $iv, $key);
+		} else {
+			$this->aes->setKey($key);
+			$this->aes->setIV($iv);
+			
+			$crypted = $this->aes->encrypt($input);
+		}
+		
+		return base64_encode($iv) . "|" . base64_encode($crypted);
+	}
+	
+	/**
+	 * Generate a random 16 byte encryption key
+	 *
+	 * Can be used on its own, internally invoked from module configuration
+	 * when no key has been set yet.
+	 *
+	 * @returns String $key
+	 */
+	public function generateKey() {
+		$key = "";
+		
+		if($this->useLibsodium) {
+			$key = base64_encode(\random_bytes(\SODIUM_CRYPTO_SECRETBOX_KEYBYTES));
+		} else {
+			require($this->config->paths->{$this->className} . "vendor/autoload.php");
+			$data = \phpseclib\Crypt\Random::string(16);
+			$key  = base64_encode($data);			
+		}
+		
+		return $key;
+	}
+	
+	/**
+	 * Create a random IV value for encryption to disable statistic attacks
+	 *
+	 * @returns String $IV
+	 */
+	public function generateIV() {
+		$iv = "";
+
+		if($this->useLibsodium) {
+			$iv = \random_bytes(\SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
+		} else {
+			require($this->config->paths->{$this->className} . "vendor/autoload.php");
+			$iv = \phpseclib\Crypt\Random::string($this->aes->getBlockLength() >> 3);
+		}
+		
+		return $iv;
+	}
+	
+	/**
+	 * Module configuration fields for encryption
+	 */
+	public function getModuleConfigInputfields($data) {
+		$inputfields = $this->wire(new InputfieldWrapper());
+		
+		$newKey = false;
+		if(! $this->myKey) {
+			$key = $this->generateKey();
+			$newKey = true;
+		} else {
+			$key = $this->myKey;
+		}
+		
+		$keyPrint = implode("' .\n\t'", str_split($key, 50));
+		
+		$f = $this->modules->get("InputfieldMarkup");
+		$f->label = $this->_("Enryption/Decryption Key");
+		$f->set('entityEncodeText', false);
+		$f->attr('value', "<pre style='white-space: pre-wrap;'>\$config->symmetricKey = '{$keyPrint}';</pre>");
+		if($newKey) {
+			$f->description = $this->_("Copy this instruction into site/config.php or add your own key (be wary about key size!) as \$config->symmetricKey:");
+		} else {
+			$f->description = $this->_("Your enryption key configured in site/config.php as \$config->symmetricKey:");
+		}
+		$inputfields->add($f);
+		
+		$f = $this->modules->get("InputfieldCheckbox");
+		$f->label = $this->_("Force old encryption");
+		$f->description = $this->_("Force old (pre-PHP7) encryption, may be needed if you upgraded you system or moved and existing site. Only change this option if you know what you are doing!");
+		if(isset($data["forceCompatEncryption"]) && $data["forceCompatEncryption"]) $f->attr('checked', 'checked');
+		$f->attr('name', "forceCompatEncryption");
+		$inputfields->add($f);
+		
+		$f = $this->modules->get("InputfieldMarkup");
+		$f->attr('value',
+			"<p>" . $this->_("Attention! While you can enable compatibility mode to use old (phpseclib/aes256) encryption on newer PHP releases, the opposite isn't possible.") . "</p>" .
+			"<p>" . $this->_("Also, make sure to back up your key.") . "</p>" .
+			"<p>" . $this->_("Using symmetric encryption on your fields is currently a one-way road, i.e. there is no tool/script to decrypt all encrypted values in the database at this time. Once you have enabled encrypted for a field and saved a value there, you have to keep using encryption for this field.") . "</p>" .
+			"<p>" . $this->_("Instead of storing your key in site/config.php, you can also hook after SymmetricEncryptedText::loadKey and retrieve it from somewhere else, e.g. a different server, to avoid compromising your key through a leaked backup.") . "</p>"
+		);
+		$inputfields->add($f);
+		
+		return $inputfields;
+	}
+}
