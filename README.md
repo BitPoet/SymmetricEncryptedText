@@ -16,8 +16,14 @@ The module by default uses sodium (if loaded) in PHP versions >= 7.2, otherwise 
 
 Multi-Language fiels are supported too.
 
+# WARNING!
+
+Setting a field to encrypted and saving values in those fields is a one-way road!
+
+Once encrypted, the contents cannot be unencrypted without writing a program to do so. Disabling the encryption option on a field after the fact gets you encrypted "garbage".
+
 # Usage
-- Download the zipped module through the [green button](https://github.com/BitPoet/SymmetricEncryptedText/archive/master.zip) at the top right of this repo
+- Download the zipped module through the [green button](https://github.com/BitPoet/SymmetricEncryptedText/archive/master.zip) at the top right of the GitHub repo or from the official PW module repository
 - Extract in its own directory under site/modules.
 - In the backend, click "Modules" -> "Refresh", then install "Symmetric Encryption for Text Fields".
 - Go to module settings. An appropriately sized, random key will be generated if this is your first use.
