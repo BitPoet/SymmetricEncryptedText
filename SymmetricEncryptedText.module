@@ -6,7 +6,7 @@ class SymmetricEncryptedText extends WireData implements Module, ConfigurableMod
 		return [
 			"title"			=>	"Symmetric Encryption for Text Fields",
 			"summary"		=>	"Store values of text fields in the database encrypted",
-			"version"		=>	"0.1.0",
+			"version"		=>	"0.1.1",
 			"autoload"		=>	true,
 			"singular"		=>	true,
 		];
@@ -169,10 +169,11 @@ class SymmetricEncryptedText extends WireData implements Module, ConfigurableMod
 	public function decrypt($rawinput) {
 		$decrypted = "";
 		
-		list($iv, $input) = explode('|', $rawinput);
-		
 		// If we find no pipe delimiter, we still have an unencrypted field here
-		if(! $input) return $rawinput;
+		// and there is nothing to do for us.
+		if(! is_string($rawinput) || strpos($rawinput,"|") === false) return $rawinput;
+		
+		list($iv, $input) = explode('|', $rawinput);
 		
 		$iv = base64_decode($iv);
 		$input = base64_decode($input);
