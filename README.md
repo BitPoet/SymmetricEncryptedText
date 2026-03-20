@@ -38,9 +38,14 @@ Thus it is recommended to avoid adding encryption to already populated fields.
 # Advanced Usage
 You can hook after SymmetricEncryptedText::loadKey to retrieve your key from somewhere else, e.g. a different server.
 
+# PHP Support
+
+Tested with PHP versions from 7.4 to 8.4
+
 # Change Log
 
-2024-04-10	Update phpseclib to 2.0.47
+* 2024-04-10	Update phpseclib to 2.0.47
+* 2025-11-19	Update phpseclib to 2.0.49
 
 # License
 See LICENSE file in the toplevel directory
